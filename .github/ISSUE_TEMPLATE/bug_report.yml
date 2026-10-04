@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in the plug-in, Setup or the daemon does not work.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Before pasting logs, remove anything private: they can contain
+        your user name in file paths. The Doctor report never includes the daemon's token.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open an image
+        2. Filters > AI Segmentation > Segment interactively (canvas)
+        3. ...
+  - type: input
+    id: gimp
+    attributes:
+      label: GIMP version and where it came from
+      placeholder: GIMP 3.2, Microsoft Store
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Operating system and GPU
+      placeholder: Windows 11, NVIDIA RTX 3060 (or "CPU only")
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor report
+      description: "*Setup / Doctor* > Doctor tab > **Copy report**, then paste here."
+      render: json
+  - type: textarea
+    id: log
+    attributes:
+      label: End of plugin.log
+      description: The last 50 lines or so. docs/INSTALL.md, "Where the logs are", says where it is.
+      render: text

@@ -1,0 +1,105 @@
+# ---- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+share/python-wheels/
+*.egg-info/
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---- Virtual environments --------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+uv.lock
+
+# ---- Test / tooling caches -------------------------------------------------
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.cache/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.hypothesis/
+
+# ---- sam3-gimp runtime artifacts --------------------------------------------
+# Anything the daemon or the plug-in writes into a working tree during dev.
+runtime.json
+sam3gimpd.lock
+install-state.json
+prompt-history.json
+*.log
+logs/
+crash.log
+.sam3-gimp/
+sam3-gimp-home/
+
+# ---- Model weights and HuggingFace cache -----------------------------------
+# ~3.6 GB; never committed.  We ship no weights.
+hf/
+hf_home/
+.huggingface/
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# ---- Downloaded tooling ----------------------------------------------------
+tools/uv
+tools/uv.exe
+tools/bin/
+
+# ---- Release archives --------------------------------------------------------
+# tools/build_release.py writes to dist/; a zip anywhere else is a mistake.
+*.zip
+
+# ---- Scratch / local dev ---------------------------------------------------
+scratch/
+tmp/
+*.tmp
+*.orig
+*.rej
+local/
+resume.txt
+
+# ---- Secrets -----------------------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+
+# ---- Editors and OS --------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Assistant tooling -------------------------------------------------------
+.claude/
+CLAUDE.md

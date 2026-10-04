@@ -1,0 +1,365 @@
+# CI for gimp-sam3-plugin.
+#
+# What this can and cannot prove:
+#
+#   CAN   -- the whole stack running for real, because `--stub` is a first-class
+#            engine (API.md section 14): a detached `sam3gimpd serve --stub` with no
+#            torch, driven through the plug-in's own client over loopback HTTP.
+#            That is `tests/test_end_to_end.py`, and it is the point of this file.
+#   CAN   -- the zero-dependency promise: a base `pip install` of the daemon with
+#            no dependencies at all, and a plug-in tree that imports nothing but
+#            the standard library and `gi`.
+#   CAN   -- the Windows-only code paths (the msvcrt lock, the Win32 process
+#            checks, quoting for paths with spaces), on a Windows runner, and
+#            that tools/install.ps1 parses.  The installer itself is not run.
+#   CANNOT -- anything CUDA, anything with the gated SAM 3 weights, and anything
+#            inside GIMP.  Those tests carry `needs_gpu` / `needs_weights` /
+#            `needs_gimp` and skip here; they need a machine with GIMP and a
+#            GPU, with the plug-in copied in by tools/dev_sync.py.  See
+#            DESIGN.md section 12.
+#
+# No job installs torch.  A green run here means the contract between the two
+# halves holds; it never means the model works.
+#
+# Supply chain: every action is pinned to a full commit SHA (the release tag is
+# in the trailing comment), every pip-installed tool to an exact version, the
+# checkout keeps no credentials, and the token is read-only.  No job uses a
+# secret.  Runner images are pinned (ubuntu-24.04, windows-2025) and moved
+# on deliberately, not when GitHub repoints the -latest labels.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------------ #
+  # The main suite, on the minimal environment: no torch, no PyGObject, no
+  # numpy.  This is what a user's machine looks like before the bootstrap runs,
+  # and every GTK/GIMP test skips itself here.
+  #
+  # The matrix is every interpreter this code can land on, because two of the
+  # three Pythons in play are not ours to choose (DESIGN.md section 3):
+  #
+  #   * the plug-in half runs in whatever GIMP embeds -- its own interpreter in
+  #     the Windows and macOS bundles, the distro's python3 on Linux, so
+  #     anything from an old LTS's 3.10 to a current Fedora's 3.14;
+  #   * the daemon runs on the pinned 3.11 uv provisions (bootstrap.py,
+  #     PINNED_PYTHON) *unless* the user points Setup at a torch environment
+  #     they already have, which is usually the newest thing they installed.
+  #
+  # Only that middle case is pinned, so the floor and the ceiling both have to
+  # be tested rather than assumed.  3.10 stays past its 2026-10-31 EOL: it costs
+  # ninety seconds, and dropping it is the only change here that could actually
+  # break somebody whose GIMP still embeds it.
+  # ------------------------------------------------------------------------ #
+  tests:
+    name: pytest (Python ${{ matrix.python-version }}, stub only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test tooling only
+        run: |
+          python -m pip install pip==26.2.1
+          python -m pip install pytest==9.1.1 pytest-timeout==2.4.0
+
+      - name: Assert the environment really has no torch
+        # The suite is meaningless if torch sneaks in as a transitive dependency:
+        # `needs_torch` tests would run against a GPU-less runner and the stub
+        # would stop being the thing under test.
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+          found = [m for m in ("torch", "transformers")
+                   if importlib.util.find_spec(m) is not None]
+          if found:
+              sys.exit("CI must run without %s; the stub engine is what is under test" % found)
+          print("no torch, no transformers -- as intended")
+          PY
+
+      - name: Run the suite
+        # --basetemp keeps every test's data directory, and so every stub
+        # daemon's log, under RUNNER_TEMP, where the next step looks.
+        run: python -m pytest -p no:cacheprovider -ra --timeout=300 --basetemp="${RUNNER_TEMP}/pytest"
+
+      - name: Show the daemon log if anything failed
+        if: failure()
+        run: |
+          find "${RUNNER_TEMP}" "${HOME}/.local/share/sam3-gimp" -name 'sam3gimpd.log' 2>/dev/null \
+            | while read -r log; do echo "=== $log ==="; tail -n 200 "$log"; done
+
+  # ------------------------------------------------------------------------ #
+  # The GTK canvas.  PyGObject is not pip-installable in a way worth
+  # maintaining, so this job uses Ubuntu's own python3-gi and a venv with
+  # --system-site-packages, under a virtual X server.  DESIGN.md section 5: the
+  # canvas is developed and tested outside GIMP precisely because it can be.
+  # ------------------------------------------------------------------------ #
+  canvas:
+    name: pytest with GTK 3 (canvas)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install GTK 3, PyGObject and a virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-gi python3-gi-cairo python3-cairo gir1.2-gtk-3.0 xvfb
+
+      - name: Create a venv that can see the system PyGObject
+        run: |
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/python -m pip install pip==26.2.1
+          .venv/bin/python -m pip install pytest==9.1.1 pytest-timeout==2.4.0
+
+      - name: Check GTK actually imports
+        run: |
+          .venv/bin/python - <<'PY'
+          import gi
+          gi.require_version("Gtk", "3.0")
+          from gi.repository import Gtk
+          import cairo
+          print("PyGObject and pycairo are importable; Gtk 3 available")
+          PY
+
+      - name: Run the suite under Xvfb
+        run: xvfb-run -a .venv/bin/python -m pytest -p no:cacheprovider -ra --timeout=300
+
+      - name: Render the canvas offscreen and keep the picture
+        # tools/canvas_harness.py is the standalone GTK harness from DESIGN.md
+        # section 5.  --selftest draws one frame to a cairo surface and exits, so
+        # it works on a runner with no window manager.
+        run: xvfb-run -a .venv/bin/python tools/canvas_harness.py --selftest --screenshot canvas.png
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: canvas-render
+          path: canvas.png
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------------------ #
+  # The daemon really is a standalone, dependency-free, pip-installable package
+  # (DESIGN.md section 3).  Installing it and driving the console script is the
+  # only way to find out.  The release zip is built here too, from the same
+  # checkout.
+  # ------------------------------------------------------------------------ #
+  package:
+    name: pip install sam3gimpd (zero dependencies, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both ends of the supported range.  The wheel is pure Python, so what
+        # this catches is metadata and build-backend drift, and that only ever
+        # shows up at an end: the oldest interpreter `requires-python` still
+        # admits, and the newest one that exists.
+        python-version: ["3.10", "3.14"]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build and install the daemon from source
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install pip==26.2.1
+          .venv/bin/python -m pip install ./plugin/sam3_gimp/_daemon
+
+      - name: The base install must pull in nothing else
+        # The daemon's own name is asked of the install -- it is whatever
+        # distribution ships the `sam3gimpd` console script -- rather than
+        # spelled out here.  The distribution is "sam3-gimp-daemon" while the
+        # import package and the script are "sam3gimpd", and a name written out
+        # by hand is how this step came to fail a perfectly good install.  What
+        # is under test is the set of *other* distributions, which must be empty.
+        run: |
+          .venv/bin/python - <<'PY'
+          import subprocess, sys, json, re
+          from importlib.metadata import distributions
+          def norm(name):
+              return re.sub(r"[-_.]+", "-", name).lower()
+          expected = {norm(d.metadata["Name"]) for d in distributions()
+                      if any(e.group == "console_scripts" and e.name == "sam3gimpd"
+                             for e in d.entry_points)}
+          if len(expected) != 1:
+              sys.exit("expected exactly one distribution to ship the sam3gimpd "
+                       "console script, found %s" % sorted(expected))
+          out = subprocess.check_output(
+              [sys.executable, "-m", "pip", "list", "--format=json", "--not-required"])
+          names = {norm(p["name"]) for p in json.loads(out)}
+          names -= {"pip", "setuptools", "wheel"}
+          if names != expected:
+              sys.exit("base install pulled in %s; API.md section 16.9 says zero "
+                       "runtime dependencies" % sorted(names - expected))
+          print("%s installed with no runtime dependencies" % sorted(expected)[0])
+          PY
+
+      - name: The console script serves, answers and shuts down
+        env:
+          SAM3_GIMP_HOME: ${{ runner.temp }}/sam3-home
+        run: |
+          mkdir -p "$SAM3_GIMP_HOME"
+          .venv/bin/sam3gimpd --version
+          .venv/bin/sam3gimpd doctor > doctor.json
+          .venv/bin/sam3gimpd serve --stub --idle-ttl 60 &
+          python - <<'PY'
+          import json, os, time, urllib.request
+          runtime = os.path.join(os.environ["SAM3_GIMP_HOME"], "runtime.json")
+          deadline = time.time() + 30
+          while time.time() < deadline and not os.path.exists(runtime):
+              time.sleep(0.1)
+          info = json.load(open(runtime))
+          def call(path, data=None):
+              req = urllib.request.Request(
+                  "http://127.0.0.1:%d%s" % (info["port"], path), data=data,
+                  headers={"Authorization": "Bearer " + info["token"],
+                           "Content-Type": "application/json"})
+              return json.load(urllib.request.urlopen(req, timeout=10))
+          hello = call("/hello")
+          assert hello["engine_mode"] == "stub", hello
+          assert hello["torch_available"] is False, hello
+          print("hello:", hello["api_version"], hello["engine_mode"], hello["device"])
+          call("/shutdown", b"{}")
+          deadline = time.time() + 15
+          while time.time() < deadline and os.path.exists(runtime):
+              time.sleep(0.1)
+          assert not os.path.exists(runtime), "runtime.json must be removed on clean exit"
+          print("clean shutdown, runtime.json removed")
+          PY
+
+      - name: The release zip builds from tracked files only
+        # tools/build_release.py refuses a dirty tree, symlinks and untracked
+        # files; on a fresh checkout it must simply succeed, with the entry
+        # script executable and the licence inside.
+        run: |
+          python tools/build_release.py --out "${RUNNER_TEMP}/sam3-gimp-ci.zip"
+          python - <<'PY'
+          import os, zipfile
+          path = os.path.join(os.environ["RUNNER_TEMP"], "sam3-gimp-ci.zip")
+          with zipfile.ZipFile(path) as zf:
+              infos = {i.filename: i for i in zf.infolist()}
+          assert "sam3_gimp/LICENSE" in infos, sorted(infos)
+          assert "sam3_gimp/_daemon/pyproject.toml" in infos, sorted(infos)
+          assert all(n.startswith("sam3_gimp/") for n in infos), sorted(infos)
+          assert not any("__pycache__" in n or n.endswith(".pyc") for n in infos)
+          mode = infos["sam3_gimp/sam3_gimp.py"].external_attr >> 16
+          assert mode & 0o111, oct(mode)
+          print("%d entries, entry script mode %o" % (len(infos), mode))
+          PY
+
+  # ------------------------------------------------------------------------ #
+  # Windows is the primary target (Microsoft Store GIMP), and the code has
+  # branches only it takes: the msvcrt lock at offset 1 MiB, the Win32 process
+  # checks, command quoting for interpreter paths with spaces, %LOCALAPPDATA%.
+  # The suite runs here without GTK, as in the first job.  install.ps1 is
+  # parsed by Windows PowerShell 5.1, which is what users run it with.
+  # ------------------------------------------------------------------------ #
+  windows:
+    name: pytest on Windows (Python 3.12, stub only)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        # Git Bash, so a failing line fails its step as it does on Linux.  A
+        # multi-line pwsh step only reports its last command's exit code.
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install test tooling only
+        run: |
+          python -m pip install pip==26.2.1
+          python -m pip install pytest==9.1.1 pytest-timeout==2.4.0
+
+      - name: install.ps1 parses
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD 'tools\install.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Host $_.ToString() }
+              exit 1
+          }
+          Write-Host 'tools/install.ps1 parses cleanly'
+
+      - name: Run the suite
+        # A short --basetemp also keeps test paths clear of Windows' 260-character limit.
+        run: python -m pytest -p no:cacheprovider -ra --timeout=300 --basetemp="${RUNNER_TEMP}/pytest"
+
+      - name: Show the daemon log if anything failed
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path $env:RUNNER_TEMP, (Join-Path $env:LOCALAPPDATA 'sam3-gimp') `
+              -Recurse -Filter 'sam3gimpd.log' -ErrorAction SilentlyContinue |
+            ForEach-Object { "=== $($_.FullName) ==="; Get-Content $_.FullName -Tail 200 }
+
+  # ------------------------------------------------------------------------ #
+  # One stable name for the branch ruleset to require.  The matrix jobs' names
+  # change whenever a Python version is added or dropped; this one does not,
+  # and it fails unless every job above succeeded.
+  # ------------------------------------------------------------------------ #
+  ci-passed:
+    name: CI passed
+    # always(), never !cancelled() or success(): a required check whose job is
+    # skipped counts as passed, which would let a broken run merge.
+    if: always()
+    needs: [tests, canvas, package, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Every job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          results = json.loads(os.environ["RESULTS"])
+          print("job results:", results)
+          if not results or any(r != "success" for r in results):
+              sys.exit("not every job succeeded")
+          PY

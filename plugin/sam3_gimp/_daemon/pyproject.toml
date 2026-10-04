@@ -1,0 +1,165 @@
+# sam3gimpd -- standalone SAM 3 segmentation daemon.
+#
+# Deliberate packaging decisions, each of which the plug-in relies on:
+#
+#   * The BASE install has ZERO runtime dependencies.  `pip install .` from this
+#     directory followed by `sam3gimpd serve --stub` must work on a machine with
+#     no GPU, no torch and no weights.  The stub engine is a product feature, not
+#     a test fixture, and it is what makes the plug-in developable without
+#     hardware.
+#   * The daemon is only ever installed BY PATH, never by name: the names it
+#     goes by ("sam3d", "sam3gimpd") are not ours on PyPI, and installing one
+#     would fetch whatever someone else publishes there.
+#   * torch arrives in its own step, from the PyTorch index only, and the rest
+#     through the [runtime] extra, from PyPI only (see [runtime] below).  The
+#     [cuda] / [rocm] / [cpu] / [mps] extras pin the same set for anyone who
+#     manages indexes another way.  Everything heavy is imported lazily inside
+#     functions -- never at module top level -- so that every module stays
+#     importable in a base install.
+#   * transformers is pinned EXACTLY.  SAM 3 lives in the v5 line and its API
+#     is young; an unpinned range is how this project breaks silently.
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+# Distribution name, deliberately distinct from the import name and from
+# anything on PyPI.  "sam3d" is already taken by an unrelated project
+# ("Unified Python interface for Meta SAM 3D Body and SAM 3D Objects"),
+# and this daemon is never published, so it is only ever installed from a
+# local path -- see bootstrap.daemon_source().
+name = "sam3-gimp-daemon"
+version = "0.1.1"
+description = "Standalone SAM 3 segmentation daemon with a loopback HTTP API"
+readme = "README.md"
+# Floor, and deliberately no ceiling.  The daemon is pure standard library, so
+# the only thing an upper bound could do is refuse to install on the interpreter
+# a user already has -- and the "use my own PyTorch" flow runs this code in
+# exactly that interpreter, which is usually the newest one they installed.
+# CI proves the floor and the ceiling on every push; see .github/workflows/ci.yml.
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "sam3-gimp contributors" }]
+keywords = ["sam3", "segmentation", "gimp", "daemon", "computer-vision"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: No Input/Output (Daemon)",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+# Intentionally empty: the daemon's HTTP server, job queue, session cache and
+# stub engine are pure standard library.
+dependencies = []
+
+# transformers 5.16.1, not 5.0.0.  SAM 3 inference works from 5.0.0, but
+# Sam3ImageProcessor only appears around 5.8 (5.0.0 ships just the *Fast*
+# variant), and the SAM 3 conversion script imports it -- so on 5.0.0 the
+# converter dies with "cannot import name 'Sam3ImageProcessor'".
+[project.optional-dependencies]
+# NVIDIA / CUDA 12.8 wheels.  torch is not on PyPI for cu128.  The installer does
+# not use this extra; it installs torch in a step of its own, confined to the
+# PyTorch index, then the daemon by path with [runtime] from PyPI only:
+#   uv pip install --python <py> --index-url https://download.pytorch.org/whl/cu128 torch==2.9.0 torchvision==0.24.0
+#   uv pip install --python <py> "<path>/_daemon[runtime]"
+# (A single command with --extra-index-url would let the resolver take any
+# requirement from either index -- the opening for a dependency-confusion
+# attack.)
+cuda = [
+  "torch==2.9.0",
+  "torchvision==0.24.0",
+  "transformers==5.16.1",
+  "regex>=2023.0.0",
+  "safetensors>=0.4.5",
+  "huggingface-hub>=0.35.0",
+  "numpy>=1.26,<3",
+  "pillow>=10.0",
+]
+
+# AMD ROCm 6.4 wheels, Linux x86_64 only (PyTorch publishes no ROCm wheels for
+# Windows or macOS).  To torch a ROCm device *is* "cuda", so the daemon's device
+# policy needs no separate branch; only the torch step's index differs, as for
+# [cuda] above:
+#   uv pip install --python <py> --index-url https://download.pytorch.org/whl/rocm6.4 torch==2.9.0 torchvision==0.24.0
+rocm = [
+  "torch==2.9.0",
+  "torchvision==0.24.0",
+  "transformers==5.16.1",
+  "regex>=2023.0.0",
+  "safetensors>=0.4.5",
+  "huggingface-hub>=0.35.0",
+  "numpy>=1.26,<3",
+  "pillow>=10.0",
+]
+
+# CPU-only wheels (P1, and useful for correctness testing on a laptop), as for
+# [cuda] above:
+#   uv pip install --python <py> --index-url https://download.pytorch.org/whl/cpu torch==2.9.0 torchvision==0.24.0
+cpu = [
+  "torch==2.9.0",
+  "torchvision==0.24.0",
+  "transformers==5.16.1",
+  "regex>=2023.0.0",
+  "safetensors>=0.4.5",
+  "huggingface-hub>=0.35.0",
+  "numpy>=1.26,<3",
+  "pillow>=10.0",
+]
+
+# Apple Silicon (MPS) uses the default PyPI wheels, so its torch step installs
+# from PyPI; the second step is the same [runtime] install as everywhere else.
+mps = [
+  "torch==2.9.0",
+  "torchvision==0.24.0",
+  "transformers==5.16.1",
+  "regex>=2023.0.0",
+  "safetensors>=0.4.5",
+  "huggingface-hub>=0.35.0",
+  "numpy>=1.26,<3",
+  "pillow>=10.0",
+]
+
+# Everything the daemon needs at runtime EXCEPT torch, for installing into an
+# environment the user already has.  Splitting this out is not tidiness: the
+# "use my own PyTorch" flow installed the daemon with no extra at all, to avoid
+# disturbing a working torch -- and silently skipped transformers with it, so
+# the daemon came up torch-ready and could not import Sam3Model.
+runtime = [
+  "transformers==5.16.1",
+  "regex>=2023.0.0",
+  "safetensors>=0.4.5",
+  "huggingface-hub>=0.35.0",
+  "numpy>=1.26,<3",
+  "pillow>=10.0",
+]
+
+# Kept so install commands that name it keep working.  The daemon traces no
+# contours itself -- masks travel as soft uint8 and the plug-in vectorises them
+# -- so nothing here needs it.
+contours = ["numpy>=1.26,<3"]
+
+dev = [
+  "pytest>=7.4",
+  "pytest-timeout>=2.2",
+]
+
+[project.scripts]
+sam3gimpd = "sam3gimpd.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/JamesAntisdel/gimp-sam3-plugin"
+Source = "https://github.com/JamesAntisdel/gimp-sam3-plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sam3gimpd"]
+
+[tool.hatch.build.targets.sdist]
+include = ["sam3gimpd", "API.md", "pyproject.toml"]
